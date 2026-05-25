@@ -6,7 +6,7 @@ This repository is for the **Robotics Computer Vision** course.
 
 For this class, I created a Docker environment based on **Ubuntu 24.04**.
 
-### Installed package
+### Installed packages
 
 - OpenCV
 
