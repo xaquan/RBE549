@@ -3,7 +3,8 @@ from typing import List
 import cv2 as cv
 from matplotlib import pyplot as plt
 
-# Rotate image by the specified angle using OpenCV's getRotationMatrix2D and warpAffine functions, and return the resulting image
+# Rotate image by the specified angle using OpenCV's getRotationMatrix2D and warpAffine functions, 
+# and return the resulting image
 def rotate_image(image, angle):
     h, w = image.shape[:2]  # Get the height and width of the input image
     center = (w / 2, h / 2)  # Calculate the center
@@ -27,9 +28,11 @@ def rotate_image(image, angle):
 def scale_image(image, scale_factor):
     # Scale the image by the specified factor using linear interpolation and return the resulting image
     if scale_factor <= 1:
-        interpolation = cv.INTER_AREA  # Use nearest neighbor interpolation for non-positive scale factors
+        # Use nearest neighbor interpolation for non-positive scale factors
+        interpolation = cv.INTER_AREA  
     else:
-        interpolation = cv.INTER_LINEAR  # Use linear interpolation for positive scale factors
+        # Use linear interpolation for positive scale factors
+        interpolation = cv.INTER_LINEAR  
     res = cv.resize(image,None,fx=scale_factor, fy=scale_factor, interpolation = interpolation)  
     return res
 
@@ -66,9 +69,10 @@ def affine_transform(image):
 # and return the resulting image
 def perspective_transform(image):
     h, w = image.shape[:2]  # Get the height and width of the input image
-    # pst1 is a cross shape
-    pts1 = np.float32([[0, 0], [550, 50], [50, 300], [550, 300]])  # Define the source points for the perspective transformation
-    pts2 = np.float32([[0, 0], [550, 50], [50, 300], [550, 350]])  # Define the destination points for the perspective transformation
+    # Define the source points for the perspective transformation
+    pts1 = np.float32([[0, 0], [550, 50], [50, 300], [550, 300]])  
+    # Define the destination points for the perspective transformation
+    pts2 = np.float32([[0, 0], [550, 50], [50, 300], [550, 350]])  
     M = cv.getPerspectiveTransform(pts1, pts2)  # Get the perspective transformation matrix
     
     # Transform all 4 corners
