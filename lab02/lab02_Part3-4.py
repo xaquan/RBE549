@@ -148,19 +148,22 @@ def add_caption(images, titles):
 # apply the Harris corner detection algorithm to the input image, 
 # and return the resulting image with detected corners highlighted
 def harris_corner_detection(image):
-    gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)  # Convert the input image to grayscale for corner detection
-    gray = np.float32(gray)  # Convert the grayscale image to float32 format for processing by the Harris corner detection algorithm
+    # Convert the input image to grayscale for corner detection
+    gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)  
+    # Convert the grayscale image to float32 format for processing by the Harris corner detection algorithm
+    gray = np.float32(gray)  
+     # Apply the Harris corner detection algorithm to the grayscale image
+    dst = cv.cornerHarris(gray, 2, 3, 0.04) 
+    # Dilate the corner response image to enhance the corner points for better visualization
+    dst_dilated = cv.dilate(dst, None)  
 
-    dst = cv.cornerHarris(gray, 2, 3, 0.04)  # Apply the Harris corner detection algorithm to the grayscale image
-    
-    dst_dilated = cv.dilate(dst, None)  # Dilate the corner response image to enhance the corner points for better visualization
-    
-    # Highlight the detected corners in the original image by setting the pixel values to red for crosses where the corner response is above a certain threshold
-    image[dst_dilated > 0.01 * dst_dilated.max()] = [0, 0, 255]  # Set the pixel values to red for corners where the dilated corner response is above 1% of the maximum response value
-   
+    # Highlight the detected corners in the original image by setting the pixel values to red f
+    # or crosses where the corner response is above a certain threshold (in this case, 4% of the maximum response value)
+    image[dst_dilated > 0.04 * dst_dilated.max()] = [0, 0, 255]  
+
     return image
 
-def harris_conner_detection_batch(images, k=0.04):
+def harris_corner_detection_batch(images):
     res = [None] * len(images)
     for i in range(len(images)):
         res[i] = harris_corner_detection(images[i].copy())
@@ -169,13 +172,20 @@ def harris_conner_detection_batch(images, k=0.04):
 # Detect SIFT features in the input image, draw the detected keypoints on the original image for visualization, 
 # and return the resulting image with detected keypoints highlighted
 def sift_feature_detection(image):
-    gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)  # Convert the input image to grayscale for feature detection
-    sift = cv.SIFT_create()  # Create a SIFT feature detector object
-    keypoints = sift.detect(gray, None)  # Detect SIFT features in the grayscale image and store the resulting keypoints in the variable keypoints
-    # image = cv.cvtColor(gray, cv.COLOR_GRAY2BGR)  # Convert the grayscale image back to BGR color format for visualization of detected features
-    color = (0, 255, 0)  # Set the color for drawing the detected keypoints to green
-    transformed = cv.drawKeypoints(image, keypoints, None, color)  # Draw the detected keypoints on the original image for visualization
-    return transformed  # Return the image with detected keypoints highlighted
+     # Convert the input image to grayscale for feature detection
+    gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY) 
+    # Create a SIFT feature detector object
+    sift = cv.SIFT_create(
+        nfeatures=200,
+        contrastThreshold=0.05, 
+    )  
+    # Detect SIFT features in the grayscale image and store the resulting keypoints in the variable keypoints
+    keypoints = sift.detect(gray, None)
+    # Set the color for drawing the detected keypoints to green
+    color = (0, 255, 0)  
+    # Draw the detected keypoints on the original image for visualization
+    transformed = cv.drawKeypoints(image, keypoints, None, color) 
+    return transformed
 
 def sift_feature_detection_batch(images):
     res = [None] * len(images)
@@ -207,7 +217,7 @@ def main():
     
     # Harris corner detection for all images
     # Add caption to the bottom of the image, and return the resulting image
-    harris_detected_corners = harris_conner_detection_batch(images) 
+    harris_detected_corners = harris_corner_detection_batch(images) 
     harris_detected_corners = add_caption(harris_detected_corners, captions)
     combined_harris = combine_images(harris_detected_corners)
     cv.imshow('Harris Corner Detected Image', combined_harris)
