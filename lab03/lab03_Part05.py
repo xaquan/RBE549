@@ -402,9 +402,11 @@ def draw_matches(img1,kp1,img2, kp2, matches, ratio=0.7, matchColor=(0, 255, 0))
 
 def object_detection(frame):
      # resize the device image height equat to the frame height while maintaining the aspect ratio
-    
-    sift_kp1, sift_des1 = detectAndCompute(sift, search_img)
-    sift_kp2, sift_des2 = detectAndCompute(sift, frame)
+    img1 = cv.cvtColor(search_img, cv.COLOR_BGR2GRAY)
+    img2 = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)   
+
+    sift_kp1, sift_des1 = detectAndCompute(sift, img1)
+    sift_kp2, sift_des2 = detectAndCompute(sift, img2)
     sift_brute_matches = brute_force_matcher(sift_des1, sift_des2)
 
     scene, mask = locate_object(sift_kp1, sift_kp2, match_mask(sift_brute_matches), search_img, frame)
