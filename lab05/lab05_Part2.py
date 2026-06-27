@@ -3,10 +3,12 @@ import cv2 as cv
 import os
 from datetime import datetime
 import numpy as np
-from lib.panoramaSticher import PanoramaStitcher
+# from lib.panoramaSticher import PanoramaStitcher
 import threading
 import time
 from time import sleep
+import queue
+
 CURRENT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 
 # Define constants for the save folder path, zoom button properties, trackbar padding, and datetime position
@@ -17,7 +19,8 @@ ZOOM_BTN_TXT_COLOR = (0, 0, 0)  # black color for text
 TRACKBAR_PADDING_LR = 80 
 TRACKBAR_PADDING_BOTTOM = 50
 THRESHOLD_VALUE = 180
-WINDOW_NAME = "xCamera 3.0"
+WINDOW_NAME = "xCamera 5.0"
+HDR_BRACKETING = 300
 
 EXTRACT_COLOR_LOWER = np.array([150, 40, 60])  # lower bound for pink color in HSV
 EXTRACT_COLOR_UPPER = np.array([320, 255, 255])  # upper bound
@@ -54,7 +57,11 @@ sift = None
 search_img = None
 nFeatures = 0
 cache_images = []
-manual_exposure_value = None  # Initialize manual_exposure_value to None
+bracket_exposures = []  # Initialize manual_exposure_value to None
+camera_frame_size = (640, 480)  # Default camera frame size
+writer_queues = []
+
+
 
 
 btn_zoom_out_pos = None
@@ -66,7 +73,7 @@ def create_save_folder():
     path = os.path.join(CURRENT_DIRECTORY, SAVE_FOLDER_PATH)
     if not os.path.exists(path):
         os.makedirs(path)
-    print("Save folder created")    
+        print(f"Save folder created: {path}")    
 
 # generate a file path for the photo or video to be saved in the save folder with the name "frame.jpg" or "video.avi"
 def generate_file_path_with_timestamp(prefix, extension):
@@ -89,7 +96,7 @@ def save_photo(frame):
 
 # start recording video, create a VideoWriter object and save the video in the save 
 # folder with the name "video.avi"
-def start_recording(filename, frame_size, fps=10, exposure_value=None):
+def start_recording(filename, frame_size, fps=10):
     global video_out
     create_save_folder()
 
@@ -194,12 +201,16 @@ def apply_sobel_filter(frame, kernel_size):
         frame[:] = cv.convertScaleAbs(sobel_y)
 
 # add trackbar to control the zoom level of the camera, the zoom level should be between 
-def add_zoom_trackbar(frame: cv.Mat):
+# isHidden is a boolean that indicates whether the zoom trackbar should be hidden or not, 
+# if it is True, the zoom trackbar will not be added to the frame
+def add_zoom_trackbar(frame: cv.Mat, isHidden=False):
     """
     Add a zoom control trackbar to the frame with "+" and "-" buttons on either side.
     The trackbar allows the user to adjust the zoom level of the camera by clicking on the "+" or "-" buttons.
     """
     global btn_zoom_out_pos, btn_zoom_in_pos
+    if isHidden:
+        return  # Do not add the zoom trackbar if it is hidden
     
     frame_height, frame_width = frame.shape[:2]
 
@@ -386,21 +397,6 @@ def get_matches_kp2(kp1, kp2, matches):
 
 # Deaw matches between two images using the provided keypoints and matches, and return the resulting image
 def draw_matches(img1,kp1,img2, kp2, matches, ratio=0.7, matchColor=(0, 255, 0)):
-    # matchesMask = [[0,0] for i in range(len(matches))]
-    # for i,(m,n) in enumerate(matches):
-    #     if m.distance < ratio*n.distance:
-    #         matchesMask[i]=[1,0]
-
-    # draw_params = dict(matchColor = matchColor,
-    #                    singlePointColor = (255,0,0),
-    #                    matchesMask = matchesMask,
-    #                    flags = cv.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
-    
-    # kp2_matches = [kp2[m.trainIdx] for m in matches]
-
-    # # img3 = cv.drawMatchesKnn(img1,kp1,img2,kp2,matches,None,**draw_params)
-
-    # img3 = cv.drawKeypoints(img2, kp2_matches, None, color=matchColor)
     good_kp = [kp2[m.trainIdx]
            for m, n in matches
            if m.distance < ratio * n.distance]
@@ -484,64 +480,168 @@ def save_panorama_photo():
 # Lab05 Part 2: Main function to capture video from the camera, apply various image processing techniques, 
 # and handle user input for recording, capturing photos, and toggling features
 
-def testing_thread(threadId):
-    print(f"Testing thread {threadId} started...")
-    while is_recording_hdr:
-        print(f"Thread {threadId} is running...")
-        sleep(2)  # Simulate some work being done in the thread
-    print(f"Testing thread {threadId} finished.")
+# Create a dark screen with "Recording HDR" text to indicate that HDR recording is in progress
+def dark_screen_hdr_recording(frame_size):
+    w, h = frame_size
+    frame = np.zeros((h, w, 3), dtype=np.uint8)  # Create a black frame
+    font = cv.FONT_HERSHEY_SIMPLEX
+    text = "Recording HDR"
+    text_size, _ = cv.getTextSize(text, font, 1, 2)
+    text_x = (w - text_size[0]) // 2
+    text_y = h - 30
+    cv.putText(frame, text, (text_x, text_y), font, 1, (0, 0, 255), 2, cv.LINE_AA)
+    return frame
+
+# Record video for a specific exposure value, write frames to a video file in a separate thread
+def recording_manual_exposure(exposure_value, writer_queue, video_filename):
+    global bracket_frames_buffer, camera_frame_size
+    print(f"Recording thread {video_filename} started...")
+    video_out = cv.VideoWriter(video_filename, cv.VideoWriter_fourcc(*'mp4v'), 5, camera_frame_size)
+        
+    while True:
+        frame = writer_queue.get()
+        if frame is None:  # None is the stop sentinel
+            writer_queue.task_done()
+            break
+        video_out.write(frame)
+        writer_queue.task_done()
+
+    video_out.release()
+    print(f"Recording thread {video_filename} finished.")
 
 # Save 3 exposure video by taking the frames and saving them as a video file with the specified filename and fps
 # Use threading to save the video in the background while the main thread continues to capture frames from the camera
-def save_multi_exposure_video(frame, filename, fps=20):
+def record_bracket_videos():
     # create thread
-    global is_recording_hdr
-    is_recording_hdr = True
-    thread1 = threading.Thread(target=testing_thread, args=(filename,))  # Pass a thread ID as an argument
-    # thread2 = threading.Thread(target=testing_thread, args=(1,))  # Pass a thread ID as an argument
+    global is_recording_hdr, bracket_exposures, camera_frame_size, writer_queues
+    print("Starting HDR recording threads...")
+    threads = []
+    create_save_folder()
+    video_paths = []
+    for i, queue in enumerate(writer_queues):
+        exposure_value = bracket_exposures[i]        
+        video_filename = generate_file_path_with_timestamp(f"bracket_video_exp_{exposure_value}", "mp4")
+        thread = threading.Thread(target=recording_manual_exposure, args=(exposure_value, queue, video_filename))  # Pass a thread ID as an argument
+        thread.start()
+        threads.append(thread)
+        video_paths.append(video_filename)
 
-    thread1.start()
-    # thread2.start()
+    return threads, video_paths
+
+# Add HDR water mark text to the frame, indicating that the frame is part of an HDR video
+# With a white color big and 30% opacity at the center of the frame, and return the resulting frame
+def add_hdr_watermark_to_frame(frame):
+    overlay = frame.copy()
+    font = cv.FONT_HERSHEY_SIMPLEX
+    text = "HDR"
+    font_thickness = 10
+    font_size = 3
+    text_size, _ = cv.getTextSize(text, font, font_size, font_thickness)
+    text_x = (frame.shape[1] - text_size[0]) // 2
+    text_y = (frame.shape[0] + text_size[1]) // 2
+    cv.putText(overlay, text, (text_x, text_y), font, font_size, (255, 255, 255), font_thickness, cv.LINE_AA)
+    alpha = 0.3  # Transparency factor
+    cv.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+    return frame
 
 
-def manual_exposure_callback(value):
-    global manual_exposure_value
-    manual_exposure_value = value
+# Create an HDR video from the 3 exposure videos using OpenCV's createMergeMertens 
+# function and save it as a new video file
+def create_hdr_video(video_paths):
+    # load the videos and create an HDR video using the HDRGenerator class
+    if len(video_paths) < 3:
+        print("Not enough videos to create HDR video.")
+        return
+    videos = [cv.VideoCapture(path) for path in video_paths]    
+    output_filename = generate_file_path_with_timestamp("hdr_video", "mp4")
+    video_out = cv.VideoWriter(output_filename, cv.VideoWriter_fourcc(*'mp4v'), 5, camera_frame_size)
+
+    while True:
+        frames = []
+        for video in videos:
+            ret, frame = video.read()
+            if not ret:
+                break
+            frames.append(frame)
+        
+        if len(frames) != len(videos):
+            break
+
+        merge_mertens = cv.createMergeMertens()
+        hdr_frame = merge_mertens.process(frames)        
+        hdr_frame = np.clip(hdr_frame * 255, 0, 255).astype('uint8')
+        hdr_frame = add_hdr_watermark_to_frame(hdr_frame)  # Add "HDR" text to the HDR frame
+        video_out.write(hdr_frame)
+
+    video_out.release()
+    print(f"HDR video created and saved as '{output_filename}'")
+
+# Record bracket frames for each exposure value, allowing the camera to adjust to the new exposure value before capturing the frame
+def record_bracket_frames(cap):
+    global bracket_exposures, writer_queues
+    print ("Recording bracket frames for HDR...")
+    while is_recording_hdr:
+        for i, exposure_value in enumerate(bracket_exposures):
+            cap.set(cv.CAP_PROP_EXPOSURE, exposure_value)
+            for _ in range(3):  # Grab a few frames to allow the camera to adjust to the new exposure value
+                cap.read()
+            _, exposure_frame = cap.read()  # Retrieve the freshly grabbed frame
+            writer_queues[i].put(exposure_frame)  # Store the frame in the writer queue for later processing
+    
+    
 
 def main():
+    
+    global is_recording, video_filename, video_out, is_extracting_color, rotate_angle, camera_frame_size
+    global is_thresholding, is_gaussian_blurring, guassian_blur_sigma, is_sharpening
+    global sobel_wait_selecting, is_sobel_filter_X, is_sobel_filter_Y, sobel_kernel_size
+    global is_canny_edge_detection, is_object_detection, sift, search_img, nFeatures
+    global is_panorama_mode, cache_images
+    global is_recording_hdr, bracket_exposures
+    global bracket_frames_buffer
+    global writer_queues
+
     cv.namedWindow(WINDOW_NAME, cv.WINDOW_AUTOSIZE)
     cv.setMouseCallback(WINDOW_NAME, mouse_callback)
+    
 
     # initialize the camera
     cap = cv.VideoCapture(0)
 
-    # set the video format to MJPG
-    cap.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv.CAP_PROP_BUFFERSIZE, 1)
-    
 
     if not cap.isOpened():
         print("Cannot open camera")
         exit() 
 
-    while True:   
-        global is_recording, video_filename, video_out, is_extracting_color, rotate_angle
-        global is_thresholding, is_gaussian_blurring, guassian_blur_sigma, is_sharpening
-        global sobel_wait_selecting, is_sobel_filter_X, is_sobel_filter_Y, sobel_kernel_size
-        global is_canny_edge_detection, is_object_detection, sift, search_img, nFeatures
-        global is_panorama_mode, cache_images
-        global is_recording_hdr, manual_exposure_value
+    # set the video format to MJPG
+    cap.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv.CAP_PROP_BUFFERSIZE, 1)
 
+    while True:   
         sift_brute_img = None
 
         # Capture frame-by-frame
-        ret, frame = cap.read()
 
-        # if frame is read correctly ret is True
-        if not ret:
-            print("Can't receive frame (stream end?). Exiting ...")
-            break
 
+        if camera_frame_size is None:
+            camera_frame_size = (frame.shape[1], frame.shape[0])  # Initialize the camera frame size based on the captured frame
+            
+
+        if is_recording_hdr:
+            bracket_exposure_frames = []  # Start with the current frame as the first exposure
+             # cap.set(cv.CAP_PROP_EXPOSURE, normal_exposure_value) 
+            frame = dark_screen_hdr_recording(camera_frame_size)  # Display a dark screen with "Recording HDR" text
+        else:
+            cap.set(cv.CAP_PROP_AUTO_EXPOSURE, 3)  # Set the exposure value to 0 (auto)
+            ret, frame = cap.read()
+                    # if frame is read correctly ret is True
+            if not ret:
+                print("Can't receive frame (stream end?). Exiting ...")
+                break
+
+
+
+            
         # Apply zoom to the frame based on the current zoom factor and display it
         if zoom_factor != 1.0:
             apply_zoom(frame, zoom_factor)
@@ -582,13 +682,6 @@ def main():
         # if is_object_detection is True, and update the frame with the resulting image
         if is_object_detection:
            sift_brute_img = object_detection(frame)
-
-        if is_recording_hdr:                
-            cap.set(cv.CAP_PROP_AUTO_EXPOSURE, 1)  # 0.25 = manual on many UVC drivers (driver-dependent)
-            cap.set(cv.CAP_PROP_EXPOSURE, manual_exposure_value)  # Set the exposure value to the current manual_exposure_value
-        else:
-            cap.set(cv.CAP_PROP_AUTO_EXPOSURE, 3)  # Set the exposure value to 0 (auto)
-
 
 
         # Create a copy of the show_frame to add date and time without modifying the 
@@ -703,14 +796,37 @@ def main():
             control_window_name = "Exposure Control"
             if not is_recording_hdr:                
                 is_recording_hdr = True
-                print("Recording multi-exposure video...")
-                manual_exposure_value = int(cap.get(cv.CAP_PROP_EXPOSURE))  # Get the current exposure value from the camera
-                cv.imshow(control_window_name, np.zeros((10, 400, 3), dtype=np.uint8))
-                cv.createTrackbar("Exposure", control_window_name, manual_exposure_value, 1000, manual_exposure_callback)
+                print("Recording multi-exposure video...")                
+                normal_exposure_value = int(cap.get(cv.CAP_PROP_EXPOSURE))  # Get the current exposure value from the camera
+                underexposed_value = max(normal_exposure_value - HDR_BRACKETING, 0)
+                overexposed_value = normal_exposure_value + HDR_BRACKETING + 400
+                bracket_exposures = [underexposed_value, overexposed_value, normal_exposure_value]  # Set the bracket exposure values
+                
+                cap.set(cv.CAP_PROP_AUTO_EXPOSURE, 1) # Set the exposure value to manual mode
+                                                                                           
+                writer_queues = [queue.Queue() for _ in range(len(bracket_exposures))]  # Create a queue for each exposure value
+
+                recording_thread = threading.Thread(target=record_bracket_frames, args=(cap,))  # Start recording the bracket frames in a separate thread
+                recording_thread.start()     
+
+                threads, video_paths = record_bracket_videos()
+                
                 # save_multi_exposure_video(frame, "multi_exposure_video1.mp4")
             else:
-                is_recording_hdr = False
-                cv.destroyWindow(control_window_name)
+                try: 
+                    is_recording_hdr = False
+                    for q in writer_queues:
+                        q.put(None)  # Send stop sentinel to each recording thread
+                    for q in writer_queues:
+                        q.join()  # Wait until each thread has processed all frames + sentinel
+                    for thread in threads:
+                        thread.join()
+                    recording_thread.join()  # Wait for the recording thread to finishs
+                except Exception as e:
+                    print(f"Error while stopping HDR recording: {e}")
+
+                create_hdr_video(video_paths)
+
                 print("Stop recording multi-exposure video...")
 
         elif key == ord('p'):
@@ -730,23 +846,15 @@ def main():
         # and add a recording indicator to the frame
         if is_recording:
             if video_out is not None:
-                video_out.write(output_frame)
-
-        # # Copy the region of interest (ROI) containing the date and time from the output frame to the show frame at the top-right corner of the frame
-        # copy_datetime_roi(output_frame, frame)
-
-        # # Add the OpenCV image to the top-left corner of the frame if it exists
-        # add_opencv_image_to_frame(frame)
-
-        # # Add a red border to the frame to indicate that the camera is active
-        # frame = add_border_to_frame(frame)        
+                video_out.write(output_frame)   
 
         if is_object_detection and sift_brute_img is not None:
             frame = sift_brute_img
 
-        # Add a zoom trackbar to the frame
-        if not is_panorama_mode:
-            add_zoom_trackbar(frame)
+        # Add a zoom trackbar to the frame except when in panorama mode or recording HDR, 
+        # as these modes do not support zooming
+        no_zoom_modes = is_panorama_mode or is_recording_hdr
+        add_zoom_trackbar(frame, isHidden=no_zoom_modes)
 
         # Display the resulting frame
         cv.imshow(WINDOW_NAME, frame)
@@ -760,6 +868,100 @@ if __name__ == "__main__":
     main()
 
 
+MIN_MATCH_COUNT = 10
+
+class PanoramaStitcher:
+    def __init__(self):
+        self.images = []
+        self.stitchedImage = None       
+    
+    # Function to add images to the stitcher
+    def addImage(self, img):
+        self.images.append(img)
+
+    def addImages(self, img_list: list):
+        self.images.extend(img_list)
+
+    # Helper functions for finding good matches and homography points
+    @staticmethod
+    def findGoodMatches(matches):
+        good_matches = []
+        for m, n in matches:
+            if m.distance < 0.75 * n.distance:
+                good_matches.append(m)
+        return good_matches
+    # Helper function to find homography points from good matches and keypoints
+    @staticmethod
+    def findHomographyPoints(good_matches, kp1, kp2):
+        dst_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+        src_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+        return src_pts, dst_pts
+    
+    def exportPanorama(self):
+        # Check if there are at least two images to stitch
+        if len(self.images) < 2:
+            print("Need at least two images to stitch.")
+            return None
+        
+        print(f"Stitching {len(self.images)} images...")
+        
+        if self.stitchedImage is None:
+            self.stitchedImage = self.images[0]
+
+        for i in range(1, len(self.images)):
+            self.stitchedImage = self.stitch(self.stitchedImage, self.images[i])
+
+        return self.stitchedImage
+
+    def stitch(self, img1, img2):
+        
+        # Step 1: Load images
+
+        # Step 2: Detect keypoints and compute descriptors using SIFT
+        sift = cv.SIFT_create()
+        kp1, des1 = sift.detectAndCompute(img1, None)
+        kp2, des2 = sift.detectAndCompute(img2, None)
+
+        # Step 3: Match descriptors using brute-force matcher
+        bf = cv.BFMatcher()
+        matches = bf.knnMatch(des1, des2, k=2)        
+
+        # Step 4: Find good matches using Lowe's ratio test
+        good_matches = self.findGoodMatches(matches)
+
+        # Step 5: Find homography and warp images if enough matches are found
+        if len(good_matches) >= MIN_MATCH_COUNT:
+            src_pts, dst_pts = self.findHomographyPoints(good_matches, kp1, kp2)
+            H, mask = cv.findHomography(src_pts, dst_pts, cv.RANSAC, 5.0)
+
+        # Step 6: Combine images using the homography
+            h1, w1 = img1.shape[:2]
+            h2, w2 = img2.shape[:2]
+            pts = np.float32([[0, 0], [0, h1 - 1], [w1 - 1, h1 - 1], [w1 - 1, 0]]).reshape(-1, 1, 2)
+            dst = cv.perspectiveTransform(pts, H)
+            # img1 = cv.polylines(img1, [np.int32(dst)], True, (255, 0, 0), 3, cv.LINE_AA)
+            print("Homography matrix:\n", H)
+            # Warp img1 to img2's perspective
+            warped_img2 = cv.warpPerspective(img2, H, (w2+w1, h2))
+
+            # Create a canvas to place the warped image and the original image side by side
+            canvas_w = w1 + w2
+            canvas_h = max(h1, h2)
+            result = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+            result[:h1, :w1] = img1
+
+            # Create a mask of the warped image and blend it with the original image on the canvas
+            gray = cv.cvtColor(warped_img2, cv.COLOR_BGR2GRAY)
+            mask = (gray > 0) # Create a mask of the warped image where pixel values are greater than 0
+            result[mask] = warped_img2[mask]
+
+            # Crop to bounding box of non-black pixels
+            gray_result = cv.cvtColor(result, cv.COLOR_BGR2GRAY)
+            coords = cv.findNonZero((gray_result > 0).astype(np.uint8))
+            x, y, w, h = cv.boundingRect(coords)
+            result = result[y:y+h, x:x+w]
+
+            return result
 
 
 
