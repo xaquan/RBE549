@@ -19,6 +19,9 @@ distorted_data = None
 
 estimate_distortion_data = {}
 
+with np.load(os.path.join(CURRENT_DIRECTORY, 'camera_calibration_data.npz')) as data:
+    mtx, dist_coeffs = data['mtx'], data['dist_coeffs']
+
 # Create ground truth camera matrix based on the image size
 def create_ground_truth_camera_matrix(width, height):
     """
@@ -63,7 +66,8 @@ def apply_distort_images(image_dir, output_dir, dist_coeffs):
         if img is None:
             continue
         image_size = img.shape[::-1][1:]  # Get (width, height)
-        K = create_ground_truth_camera_matrix(image_size[0], image_size[1])
+        # K = create_ground_truth_camera_matrix(image_size[0], image_size[1])
+        K = mtx  # Use the loaded camera matrix from calibration data
         distorted_img = apply_distort_image(img, K, dist_coeffs)
         base_name = os.path.basename(fname)
         output_path = os.path.join(output_dir, f"{base_name}")
